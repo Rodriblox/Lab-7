@@ -1,0 +1,258 @@
+#include "stm32f4xx_hal.h"
+#include <stdio.h>
+#include <string.h>
+
+/* ---------- Definición de pines ---------- */
+#define INC_BTN_Port GPIOC
+#define INC_BTN_Pin  GPIO_PIN_10
+#define DEC_BTN_Port GPIOC
+#define DEC_BTN_Pin  GPIO_PIN_11
+#define MODE_BTN_Port GPIOC
+#define MODE_BTN_Pin  GPIO_PIN_12
+
+#define MODE_LED_Port GPIOB
+#define MODE_LED_Pin  GPIO_PIN_3   // cambiado a PB3
+
+/* LEDs binarios */
+#define LED_D0_Port GPIOB
+#define LED_D0_Pin  GPIO_PIN_10
+#define LED_D1_Port GPIOD
+#define LED_D1_Pin  GPIO_PIN_2
+#define LED_D2_Port GPIOC
+#define LED_D2_Pin  GPIO_PIN_8
+#define LED_D3_Port GPIOC
+#define LED_D3_Pin  GPIO_PIN_9
+
+/* LED RGB */
+#define RGB_R_Port GPIOB
+#define RGB_R_Pin  GPIO_PIN_13
+#define RGB_G_Port GPIOB
+#define RGB_G_Pin  GPIO_PIN_14
+#define RGB_B_Port GPIOB
+#define RGB_B_Pin  GPIO_PIN_15
+
+UART_HandleTypeDef huart3;
+
+/* ---------- Prototipos ---------- */
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART3_UART_Init(void);
+void show_binary(uint8_t value);
+void set_rgb(uint8_t idx);
+uint8_t debounce(GPIO_TypeDef* port, uint16_t pin);
+
+/* ---------- Variables ---------- */
+uint8_t mode = 0;       // 0=contador, 1=RGB
+uint8_t cnt_decade = 0; // 0..9
+uint8_t cnt_rgb = 0;    // 0..6
+
+#define DB_MS 50
+
+int _write(int file, char *ptr, int len){
+  HAL_UART_Transmit(&huart3,(uint8_t*)ptr,len,HAL_MAX_DELAY);
+  return len;
+}
+
+/* ---------- MAIN ---------- */
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_USART3_UART_Init();
+
+  printf("\r\n[STM32F446RE] Contador binario + RGB\r\n");
+
+  show_binary(cnt_decade);
+
+  while (1)
+  {
+    /* Refrescar estado LED de modo (siempre activo en modo RGB) */
+    if (mode) HAL_GPIO_WritePin(MODE_LED_Port, MODE_LED_Pin, GPIO_PIN_SET);
+    else HAL_GPIO_WritePin(MODE_LED_Port, MODE_LED_Pin, GPIO_PIN_RESET);
+
+    /* ----- Botón incremento ----- */
+    if (debounce(INC_BTN_Port, INC_BTN_Pin)){
+      if(!mode){
+        cnt_decade = (cnt_decade + 1) % 10;
+        show_binary(cnt_decade);
+        printf("Contador -> %u\r\n", cnt_decade);
+      } else {
+        cnt_rgb = (cnt_rgb + 1) % 7;
+        set_rgb(cnt_rgb);
+        printf("RGB -> %u\r\n", cnt_rgb);
+      }
+    }
+
+    /* ----- Botón decremento ----- */
+    if (debounce(DEC_BTN_Port, DEC_BTN_Pin)){
+      if(!mode){
+        cnt_decade = (cnt_decade + 9) % 10;
+        show_binary(cnt_decade);
+        printf("Contador -> %u\r\n", cnt_decade);
+      } else {
+        cnt_rgb = (cnt_rgb + 6) % 7;
+        set_rgb(cnt_rgb);
+        printf("RGB -> %u\r\n", cnt_rgb);
+      }
+    }
+
+    /* ----- Cambio de modo ----- */
+    if (debounce(MODE_BTN_Port, MODE_BTN_Pin)){
+      mode ^= 1;
+
+      if(mode){
+        /* Apagar LEDs binarios */
+        HAL_GPIO_WritePin(LED_D0_Port,LED_D0_Pin,GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_D1_Port,LED_D1_Pin,GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_D2_Port,LED_D2_Pin,GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LED_D3_Port,LED_D3_Pin,GPIO_PIN_RESET);
+        set_rgb(cnt_rgb);
+      } else {
+        /* Apagar RGB y mostrar contador */
+        HAL_GPIO_WritePin(RGB_R_Port,RGB_R_Pin,GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(RGB_G_Port,RGB_G_Pin,GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(RGB_B_Port,RGB_B_Pin,GPIO_PIN_RESET);
+        show_binary(cnt_decade);
+      }
+
+      /* LED indicador actualizado inmediatamente */
+      HAL_GPIO_WritePin(MODE_LED_Port, MODE_LED_Pin, mode ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+      printf("Modo -> %s\r\n", mode?"RGB":"Contador");
+    }
+
+    HAL_Delay(3);
+  }
+}
+
+/* ---------- Mostrar número binario (0–9) ---------- */
+void show_binary(uint8_t value){
+  HAL_GPIO_WritePin(LED_D0_Port,LED_D0_Pin,(value&0x01)?GPIO_PIN_SET:GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_D1_Port,LED_D1_Pin,(value&0x02)?GPIO_PIN_SET:GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_D2_Port,LED_D2_Pin,(value&0x04)?GPIO_PIN_SET:GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_D3_Port,LED_D3_Pin,(value&0x08)?GPIO_PIN_SET:GPIO_PIN_RESET);
+}
+
+/* ---------- Antirrebote ---------- */
+uint8_t debounce(GPIO_TypeDef* port, uint16_t pin) {
+    static uint32_t last_press_time[3] = {0};
+    static uint8_t last_state[3] = {0};
+    uint8_t index = 0;
+
+    if (port == INC_BTN_Port && pin == INC_BTN_Pin) index = 0;
+    else if (port == DEC_BTN_Port && pin == DEC_BTN_Pin) index = 1;
+    else index = 2; // MODE
+
+    uint8_t current_state = HAL_GPIO_ReadPin(port, pin);
+    uint32_t now = HAL_GetTick();
+    uint8_t pressed = 0;
+
+    if (current_state && !last_state[index]) {
+        if (now - last_press_time[index] > DB_MS) {
+            pressed = 1;
+            last_press_time[index] = now;
+        }
+    }
+
+    last_state[index] = current_state;
+    return pressed;
+}
+
+/* ---------- RGB combinaciones ---------- */
+void set_rgb(uint8_t i){
+  uint8_t r=0,g=0,b=0;
+  switch(i){
+    case 0: r=0; g=0; b=0; break; // Apagado
+    case 1: r=1; g=0; b=0; break; // Rojo
+    case 2: r=1; g=0; b=1; break; // Magenta
+    case 3: r=0; g=0; b=1; break; // Azul
+    case 4: r=0; g=1; b=1; break; // Cian
+    case 5: r=0; g=1; b=0; break; // Verde
+    case 6: r=1; g=1; b=0; break; // Amarillo
+    default: r=0; g=0; b=0; break;
+  }
+
+  HAL_GPIO_WritePin(RGB_R_Port, RGB_R_Pin, r ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RGB_G_Port, RGB_G_Pin, g ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RGB_B_Port, RGB_B_Pin, b ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+/* ---------- GPIO ---------- */
+static void MX_GPIO_Init(void)
+{
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  GPIO_InitTypeDef g={0};
+
+  /* Entradas botones */
+  g.Mode = GPIO_MODE_INPUT;
+  g.Pull = GPIO_PULLDOWN;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
+
+  g.Pin = INC_BTN_Pin; HAL_GPIO_Init(INC_BTN_Port,&g);
+  g.Pin = DEC_BTN_Pin; HAL_GPIO_Init(DEC_BTN_Port,&g);
+  g.Pin = MODE_BTN_Pin; HAL_GPIO_Init(MODE_BTN_Port,&g);
+
+  /* Salidas para LEDs binarios y RGB */
+  g.Mode = GPIO_MODE_OUTPUT_PP;
+  g.Pull = GPIO_NOPULL;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
+
+  g.Pin = LED_D1_Pin; HAL_GPIO_Init(GPIOD,&g);
+  g.Pin = LED_D0_Pin | RGB_R_Pin | RGB_G_Pin | RGB_B_Pin; HAL_GPIO_Init(GPIOB,&g);
+  g.Pin = LED_D2_Pin | LED_D3_Pin; HAL_GPIO_Init(GPIOC,&g);
+
+  /* LED de modo separado (PB3) */
+  g.Pin = MODE_LED_Pin;
+  g.Mode = GPIO_MODE_OUTPUT_PP;
+  g.Pull = GPIO_NOPULL;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(MODE_LED_Port, &g);
+}
+
+/* ---------- UART3 (PD8 TX / PD9 RX) ---------- */
+static void MX_USART3_UART_Init(void)
+{
+  __HAL_RCC_USART3_CLK_ENABLE();
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  HAL_UART_Init(&huart3);
+}
+
+/* ---------- Reloj ---------- */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef o={0};
+  RCC_ClkInitTypeDef c={0};
+
+  __HAL_RCC_PWR_CLK_ENABLE();
+  HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  o.OscillatorType=RCC_OSCILLATORTYPE_HSI;
+  o.HSIState=RCC_HSI_ON;
+  o.HSICalibrationValue=RCC_HSICALIBRATION_DEFAULT;
+  o.PLL.PLLState=RCC_PLL_ON;
+  o.PLL.PLLSource=RCC_PLLSOURCE_HSI;
+  o.PLL.PLLM=8;
+  o.PLL.PLLN=180;
+  o.PLL.PLLP=RCC_PLLP_DIV2;
+  o.PLL.PLLQ=2;
+  HAL_RCC_OscConfig(&o);
+  HAL_PWREx_EnableOverDrive();
+
+  c.ClockType=RCC_CLOCKTYPE_SYSCLK|RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  c.SYSCLKSource=RCC_SYSCLKSOURCE_PLLCLK;
+  c.AHBCLKDivider=RCC_SYSCLK_DIV1;
+  c.APB1CLKDivider=RCC_HCLK_DIV4;
+  c.APB2CLKDivider=RCC_HCLK_DIV2;
+  HAL_RCC_ClockConfig(&c,FLASH_LATENCY_5);
+}
